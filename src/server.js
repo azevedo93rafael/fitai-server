@@ -2,56 +2,69 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const twilio = require('twilio');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Middleware ──────────────────────────────────────────
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// ── In-memory store (persiste enquanto o servidor rodar)
-// No Render free tier, o servidor dorme após inatividade —
-// para persistência real, conecte um banco. Por agora funciona perfeitamente.
-const store = {
-  checkins: {},   // { "2025-06-03": true/false }
-  weightLog: [],  // [{ date, kg }]
-  pendingInput: null, // estado da conversa (ex: esperando peso)
-};
+// ── Supabase ────────────────────────────────────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL     || 'https://oajmibjuzltiryqdrddk.supabase.co',
+  process.env.SUPABASE_SERVICE_KEY // service_role key (env var no Render)
+);
 
-// ── Helpers ─────────────────────────────────────────────
+// ── Twilio ──────────────────────────────────────────────
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
+const MY_NUMBER   = process.env.MY_WHATSAPP_NUMBER;
+const FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 
-const MY_NUMBER   = process.env.MY_WHATSAPP_NUMBER; // ex: whatsapp:+5521999999999
-const FROM_NUMBER = process.env.TWILIO_FROM_NUMBER; // whatsapp:+14155238886
+// Estado de conversa em memória (só precisa durar a sessão)
+let pendingInput = null;
 
-function today() {
-  return new Date().toISOString().split('T')[0];
-}
+// ── Helpers ─────────────────────────────────────────────
+function today() { return new Date().toISOString().split('T')[0]; }
 
-function formatDate(dateStr) {
-  const [y, m, d] = dateStr.split('-');
-  return `${d}/${m}/${y}`;
-}
+function formatDate(d) { const [y,m,dd] = d.split('-'); return `${dd}/${m}/${y}`; }
 
 async function sendWA(to, body) {
-  try {
-    await twilioClient.messages.create({ from: FROM_NUMBER, to, body });
-  } catch (e) {
-    console.error('Twilio send error:', e.message);
-  }
+  try { await twilioClient.messages.create({ from: FROM_NUMBER, to, body }); }
+  catch(e) { console.error('Twilio error:', e.message); }
 }
 
-function calcStreak(checkins) {
+// ── DB helpers ───────────────────────────────────────────
+async function getCheckins() {
+  const { data } = await supabase.from('checkins').select('*').order('date', { ascending: true });
+  const map = {};
+  (data || []).forEach(r => { map[r.date] = r.done; });
+  return map;
+}
+
+async function saveCheckin(date, done) {
+  await supabase.from('checkins').upsert({ date, done }, { onConflict: 'date' });
+}
+
+async function getWeightLog() {
+  const { data } = await supabase.from('weight_log').select('*').order('date', { ascending: true });
+  return (data || []).map(r => ({ date: r.date, kg: r.kg }));
+}
+
+async function saveWeight(date, kg) {
+  await supabase.from('weight_log').upsert({ date, kg: parseFloat(kg) }, { onConflict: 'date' });
+}
+
+async function calcStreak() {
+  const checkins = await getCheckins();
   let streak = 0;
   const now = new Date();
   for (let i = 0; i < 90; i++) {
-    const d = new Date(now);
-    d.setDate(now.getDate() - i);
+    const d = new Date(now); d.setDate(now.getDate() - i);
     const key = d.toISOString().split('T')[0];
     if (checkins[key] === true) streak++;
     else if (checkins[key] === false) break;
@@ -59,175 +72,164 @@ function calcStreak(checkins) {
   return streak;
 }
 
-// ── WEBHOOK — recebe mensagens do WhatsApp ───────────────
+// ── WEBHOOK WhatsApp ─────────────────────────────────────
 app.post('/webhook/whatsapp', async (req, res) => {
-  // Twilio envia como form-urlencoded
-  const from = req.body.From;   // ex: whatsapp:+5521999999999
+  const from = req.body.From;
   const body = (req.body.Body || '').trim().toLowerCase();
+  console.log(`📱 ${from}: "${body}"`);
 
-  console.log(`📱 Mensagem recebida de ${from}: "${body}"`);
-
-  // Segurança: ignora mensagens de outros números
   if (MY_NUMBER && from !== MY_NUMBER) {
-    console.log('⚠️ Número não autorizado:', from);
     return res.status(200).send('<Response></Response>');
   }
 
   let reply = '';
 
-  // ── Estado: esperando peso após lembrete de domingo ──
-  if (store.pendingInput === 'weight') {
+  // ── Esperando peso ──────────────────────────────────
+  if (pendingInput === 'weight') {
     const kg = parseFloat(body.replace(',', '.'));
     if (!isNaN(kg) && kg > 40 && kg < 300) {
-      const entry = { date: today(), kg };
-      const existing = store.weightLog.findIndex(l => l.date === today());
-      if (existing >= 0) store.weightLog[existing] = entry;
-      else store.weightLog.push(entry);
-      store.pendingInput = null;
-
-      // Calcula diferença com último registro
-      const prev = store.weightLog.length >= 2
-        ? store.weightLog[store.weightLog.length - 2]
-        : null;
+      await saveWeight(today(), kg);
+      pendingInput = null;
+      const log = await getWeightLog();
+      const prev = log.length >= 2 ? log[log.length - 2] : null;
       const diff = prev ? (prev.kg - kg).toFixed(1) : null;
       const diffText = diff
-        ? (diff > 0 ? `⬇️ ${diff} kg a menos que a semana passada!` : diff < 0 ? `⬆️ ${Math.abs(diff)} kg a mais — bora focar!` : '➡️ Peso estável esta semana.')
+        ? (diff > 0 ? `⬇️ ${diff} kg a menos que a semana passada!`
+          : diff < 0 ? `⬆️ ${Math.abs(diff)} kg a mais — bora focar!`
+          : '➡️ Peso estável.')
         : '';
-
       reply = `✅ *Peso registrado: ${kg} kg*\n${diffText}\n\n📊 Abra o FitAI para ver seu gráfico atualizado!`;
     } else {
-      reply = '⚠️ Não entendi o valor. Por favor, responda com seu peso em kg.\nExemplo: *112.5*';
+      reply = '⚠️ Não entendi. Responda com seu peso em kg.\nExemplo: *112.5*';
     }
 
-  // ── Check-in SIM ────────────────────────────────────
-  } else if (['sim', 's', 'yes', '✅', 'fiz', 'treinei', '👍'].includes(body)) {
-    store.checkins[today()] = true;
-    const streak = calcStreak(store.checkins);
-    const streakMsg = streak >= 7
-      ? `🔥 ${streak} dias seguidos! Você é uma máquina!`
-      : streak >= 3
-      ? `🔥 ${streak} dias consecutivos! Continue assim!`
+  // ── SIM ─────────────────────────────────────────────
+  } else if (['sim','s','yes','✅','fiz','treinei','👍'].includes(body)) {
+    await saveCheckin(today(), true);
+    const streak = await calcStreak();
+    const streakMsg = streak >= 7 ? `🔥 ${streak} dias seguidos! Você é uma máquina!`
+      : streak >= 3 ? `🔥 ${streak} dias consecutivos! Continue assim!`
       : `💪 Treino registrado! ${streak} dia(s) de sequência.`;
+    reply = `✅ *Check-in confirmado!*\n\n${streakMsg}\n\nAbra o FitAI para registrar suas cargas 🏋️`;
 
-    reply = `✅ *Check-in confirmado!*\n\n${streakMsg}\n\nAbra o FitAI para registrar suas cargas de hoje 🏋️`;
+  // ── NÃO ─────────────────────────────────────────────
+  } else if (['nao','não','n','no','❌','nop'].includes(body)) {
+    await saveCheckin(today(), false);
+    reply = `📝 *Falta registrada.*\n\nNão tem problema! Amanhã é um novo dia 💪`;
 
-  // ── Check-in NÃO ────────────────────────────────────
-  } else if (['nao', 'não', 'n', 'no', '❌', 'nã', 'nop'].includes(body)) {
-    store.checkins[today()] = false;
-    reply = `📝 *Falta registrada.*\n\nNão tem problema! Amanhã é um novo dia 💪\n\nSe quiser, me diga o motivo e vejo como posso ajudar.`;
-
-  // ── Usuário manda peso direto ───────────────────────
+  // ── Número = peso direto ─────────────────────────────
   } else if (/^\d{2,3}([.,]\d{1,2})?$/.test(body)) {
     const kg = parseFloat(body.replace(',', '.'));
     if (kg > 40 && kg < 300) {
-      const entry = { date: today(), kg };
-      const existing = store.weightLog.findIndex(l => l.date === today());
-      if (existing >= 0) store.weightLog[existing] = entry;
-      else store.weightLog.push(entry);
-
-      reply = `⚖️ *Peso ${kg} kg registrado!*\n\n📊 Abra o FitAI para ver seu progresso atualizado.`;
+      await saveWeight(today(), kg);
+      reply = `⚖️ *Peso ${kg} kg registrado!*\n\n📊 Abra o FitAI para ver seu progresso.`;
     }
 
-  // ── Comando: status ─────────────────────────────────
-  } else if (['status', 'resumo', 'como estou', 'progresso'].includes(body)) {
-    const streak = calcStreak(store.checkins);
-    const lastWeight = store.weightLog.length
-      ? store.weightLog[store.weightLog.length - 1]
-      : null;
-    const thisWeekCheckins = Object.entries(store.checkins)
-      .filter(([date]) => {
-        const d = new Date(date);
-        const now = new Date();
-        const diff = (now - d) / (1000 * 60 * 60 * 24);
-        return diff <= 7;
-      })
-      .filter(([, v]) => v === true).length;
-
+  // ── STATUS ───────────────────────────────────────────
+  } else if (['status','resumo','progresso'].includes(body)) {
+    const [checkins, log, streak] = await Promise.all([getCheckins(), getWeightLog(), calcStreak()]);
+    const lastW = log.length ? log[log.length - 1] : null;
+    const now = new Date();
+    const weekCheckins = Object.entries(checkins)
+      .filter(([d, v]) => v === true && (now - new Date(d)) / 86400000 <= 7).length;
     reply = `📊 *Seu status FitAI:*\n\n`
-      + `⚖️ Último peso: ${lastWeight ? `${lastWeight.kg} kg (${formatDate(lastWeight.date)})` : 'não registrado'}\n`
-      + `🏋️ Treinos esta semana: ${thisWeekCheckins}\n`
+      + `⚖️ Último peso: ${lastW ? `${lastW.kg} kg (${formatDate(lastW.date)})` : 'não registrado'}\n`
+      + `🏋️ Treinos esta semana: ${weekCheckins}\n`
       + `🔥 Sequência atual: ${streak} dia(s)\n\n`
       + `_Abra o app para análise completa!_`;
 
-  // ── Comando: ajuda ───────────────────────────────────
-  } else if (['ajuda', 'help', 'comandos', 'oi', 'olá', 'ola'].includes(body)) {
-    reply = `🤖 *FitAI — Comandos disponíveis:*\n\n`
-      + `✅ *SIM* — registrar treino feito\n`
+  // ── AJUDA ────────────────────────────────────────────
+  } else if (['ajuda','help','oi','olá','ola','comandos'].includes(body)) {
+    reply = `🤖 *FitAI — Comandos:*\n\n`
+      + `✅ *SIM* — treino feito\n`
       + `❌ *NÃO* — registrar falta\n`
-      + `⚖️ *112.5* — registrar peso (qualquer número)\n`
-      + `📊 *STATUS* — ver seu resumo\n`
-      + `❓ *AJUDA* — ver esta lista\n\n`
-      + `_Abra o FitAI para mais detalhes!_`;
+      + `⚖️ *112.5* — registrar peso\n`
+      + `📊 *STATUS* — ver resumo\n`
+      + `❓ *AJUDA* — esta lista`;
 
-  // ── Mensagem não reconhecida ─────────────────────────
   } else {
-    reply = `🤖 Não entendi. Responda *AJUDA* para ver os comandos disponíveis.`;
+    reply = `🤖 Não entendi. Responda *AJUDA* para ver os comandos.`;
   }
 
-  // Responde via Twilio
-  if (reply) {
-    await sendWA(from, reply);
-  }
-
-  // Twilio espera um 200 com TwiML vazio
+  if (reply) await sendWA(from, reply);
   res.set('Content-Type', 'text/xml');
   res.send('<Response></Response>');
 });
 
-// ── API — consultada pelo app FitAI ─────────────────────
+// ── API ──────────────────────────────────────────────────
 
-// GET /api/checkins — retorna todos os check-ins
-app.get('/api/checkins', (req, res) => {
-  res.json({ checkins: store.checkins });
+app.get('/api/checkins', async (req, res) => {
+  const checkins = await getCheckins();
+  res.json({ checkins });
 });
 
-// POST /api/checkins — registra check-in direto do app
-app.post('/api/checkins', (req, res) => {
+app.post('/api/checkins', async (req, res) => {
   const { date, done } = req.body;
   if (!date || done === undefined) return res.status(400).json({ error: 'date e done obrigatórios' });
-  store.checkins[date] = done;
-  res.json({ ok: true, checkins: store.checkins });
+  await saveCheckin(date, done);
+  res.json({ ok: true });
 });
 
-// GET /api/weight — retorna histórico de peso
-app.get('/api/weight', (req, res) => {
-  res.json({ weightLog: store.weightLog });
+app.get('/api/weight', async (req, res) => {
+  const weightLog = await getWeightLog();
+  res.json({ weightLog });
 });
 
-// POST /api/weight — registra peso direto do app
-app.post('/api/weight', (req, res) => {
+app.post('/api/weight', async (req, res) => {
   const { date, kg } = req.body;
   if (!date || !kg) return res.status(400).json({ error: 'date e kg obrigatórios' });
-  const entry = { date, kg: parseFloat(kg) };
-  const existing = store.weightLog.findIndex(l => l.date === date);
-  if (existing >= 0) store.weightLog[existing] = entry;
-  else store.weightLog.push(entry);
-  res.json({ ok: true, weightLog: store.weightLog });
+  await saveWeight(date, kg);
+  res.json({ ok: true });
 });
 
-// GET /api/status — health check
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
+  const [checkins, log, streak] = await Promise.all([getCheckins(), getWeightLog(), calcStreak()]);
   res.json({
     ok: true,
-    streak: calcStreak(store.checkins),
-    lastWeight: store.weightLog[store.weightLog.length - 1] || null,
-    totalCheckins: Object.values(store.checkins).filter(Boolean).length,
+    streak,
+    lastWeight: log[log.length - 1] || null,
+    totalCheckins: Object.values(checkins).filter(Boolean).length,
     uptime: process.uptime(),
   });
 });
 
-// POST /api/trigger-weight-prompt — Make.com chama isso no domingo
 app.post('/api/trigger-weight-prompt', async (req, res) => {
-  store.pendingInput = 'weight';
+  pendingInput = 'weight';
   await sendWA(MY_NUMBER,
-    `⚖️ *FitAI — Pesagem semanal!*\n\nBom domingo, Raphael! 🌅\n\nQual seu peso hoje? Responda aqui com o número.\nExemplo: *112.5*`
+    `⚖️ *FitAI — Pesagem semanal!*\n\nBom domingo, Raphael! 🌅\n\nQual seu peso hoje?\nResponda com o número. Exemplo: *112.5*`
   );
   res.json({ ok: true });
 });
 
+// Salva programa de treino e dieta (do app)
+app.post('/api/program', async (req, res) => {
+  const { workoutPlan, dietPlan, profile } = req.body;
+  await supabase.from('program').upsert({ id: 1, workout_plan: workoutPlan, diet_plan: dietPlan, profile }, { onConflict: 'id' });
+  res.json({ ok: true });
+});
+
+app.get('/api/program', async (req, res) => {
+  const { data } = await supabase.from('program').select('*').eq('id', 1).single();
+  res.json(data || {});
+});
+
+// Salva cargas
+app.post('/api/cargas', async (req, res) => {
+  const { date, data } = req.body;
+  if (!date || !data) return res.status(400).json({ error: 'date e data obrigatórios' });
+  await supabase.from('cargas').upsert({ date, data }, { onConflict: 'date' });
+  res.json({ ok: true });
+});
+
+app.get('/api/cargas', async (req, res) => {
+  const { data } = await supabase.from('cargas').select('*').order('date', { ascending: true });
+  const map = {};
+  (data || []).forEach(r => { map[r.date] = r.data; });
+  res.json({ cargas: map });
+});
+
 // ── Start ────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 FitAI Server rodando na porta ${PORT}`);
-  console.log(`📱 Webhook WhatsApp: POST /webhook/whatsapp`);
-  console.log(`🔗 API: GET /api/status`);
+  console.log(`🚀 FitAI Server na porta ${PORT}`);
+  console.log(`🗄️  Supabase: ${process.env.SUPABASE_URL || 'https://oajmibjuzltiryqdrddk.supabase.co'}`);
 });

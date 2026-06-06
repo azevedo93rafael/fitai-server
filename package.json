@@ -1,7 +1,7 @@
 {
   "name": "fitai-server",
-  "version": "1.0.0",
-  "description": "FitAI backend — WhatsApp webhook + API",
+  "version": "2.0.0",
+  "description": "FitAI backend — WhatsApp webhook + Supabase",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -11,6 +11,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.43.0",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "express": "^4.18.2",
