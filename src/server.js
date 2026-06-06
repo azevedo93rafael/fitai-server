@@ -86,31 +86,70 @@ app.post('/api/ai', async (req, res) => {
       formattedMessages.push({ role: m.role, content: m.content });
     });
 
-    const response = await fetch(
-      'https://openrouter.ai/api/v1/chat/completions',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          'HTTP-Referer': 'https://fitai-1pnw.onrender.com',
-          'X-Title': 'FitAI'
-        },
-        body: JSON.stringify({
-          model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
-          messages: formattedMessages,
-          max_tokens: max_tokens,
-          temperature: 0.7
-        })
-      }
-    );
-    
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'Erro na API do OpenRouter' });
+    const requestedModel = process.env.OPENROUTER_MODEL;
+    // Fallback list of models in case of rate limits (429) or other temporary errors
+    const fallbackModels = [
+      'meta-llama/llama-3.3-70b-instruct:free',
+      'google/gemma-4-31b-it:free',
+      'qwen/qwen3-next-80b-a3b-instruct:free',
+      'openrouter/free'
+    ];
+
+    // Build the list of models to try in sequence
+    const modelsToTry = [];
+    if (requestedModel) {
+      modelsToTry.push(requestedModel);
     }
-    
-    res.json({ text: data.choices?.[0]?.message?.content || '' });
+    fallbackModels.forEach(m => {
+      if (!modelsToTry.includes(m)) {
+        modelsToTry.push(m);
+      }
+    });
+
+    let lastError = null;
+    let lastStatus = 500;
+
+    for (const model of modelsToTry) {
+      try {
+        console.log(`🤖 FitAI: tentando chamar o modelo OpenRouter: ${model}...`);
+        const response = await fetch(
+          'https://openrouter.ai/api/v1/chat/completions',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+              'HTTP-Referer': 'https://fitai-1pnw.onrender.com',
+              'X-Title': 'FitAI'
+            },
+            body: JSON.stringify({
+              model: model,
+              messages: formattedMessages,
+              max_tokens: max_tokens,
+              temperature: 0.7
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (response.ok) {
+          console.log(`✅ FitAI: sucesso com o modelo ${model}`);
+          return res.json({ text: data.choices?.[0]?.message?.content || '' });
+        }
+
+        // Se deu erro, salva o erro e tenta o próximo
+        lastStatus = response.status;
+        lastError = data.error?.message || 'Erro na API do OpenRouter';
+        console.warn(`⚠️ FitAI: erro ao chamar ${model} (Status ${response.status}): ${lastError}`);
+      } catch (e) {
+        lastStatus = 500;
+        lastError = e.message;
+        console.error(`❌ FitAI: falha na requisição para ${model}: ${e.message}`);
+      }
+    }
+
+    // Se saiu do loop, todos os modelos falharam
+    res.status(lastStatus).json({ error: `Todos os modelos falharam. Último erro: ${lastError}` });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -286,7 +325,6 @@ app.get('/api/test-twilio', async (req, res) => {
 
 app.get('/api/test-openrouter', async (req, res) => {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const modelName = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
   if (!apiKey) {
     return res.status(400).json({ success: false, error: 'OPENROUTER_API_KEY env var is not set on the server' });
   }
@@ -297,42 +335,74 @@ app.get('/api/test-openrouter', async (req, res) => {
     return `${str.slice(0, 10)}...${str.slice(-4)}`;
   };
 
-  try {
-    console.log(`Testing OpenRouter with model ${modelName}...`);
-    const response = await fetch(
-      'https://openrouter.ai/api/v1/chat/completions',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-          'HTTP-Referer': 'https://fitai-1pnw.onrender.com',
-          'X-Title': 'FitAI'
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [{ role: 'user', content: 'Respond with "OK"' }],
-          max_tokens: 10
-        })
+  const requestedModel = process.env.OPENROUTER_MODEL;
+  const fallbackModels = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemma-4-31b-it:free',
+    'qwen/qwen3-next-80b-a3b-instruct:free',
+    'openrouter/free'
+  ];
+
+  const modelsToTry = [];
+  if (requestedModel) modelsToTry.push(requestedModel);
+  fallbackModels.forEach(m => {
+    if (!modelsToTry.includes(m)) modelsToTry.push(m);
+  });
+
+  const results = [];
+
+  for (const model of modelsToTry) {
+    try {
+      console.log(`Testing OpenRouter with model ${model}...`);
+      const response = await fetch(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://fitai-1pnw.onrender.com',
+            'X-Title': 'FitAI'
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: [{ role: 'user', content: 'Respond with "OK"' }],
+            max_tokens: 10
+          })
+        }
+      );
+      
+      const data = await response.json();
+      results.push({
+        model,
+        success: response.ok,
+        status: response.status,
+        response: data
+      });
+
+      if (response.ok) {
+        return res.json({
+          success: true,
+          apiKey: mask(apiKey),
+          workingModel: model,
+          results: results
+        });
       }
-    );
-    
-    const data = await response.json();
-    res.json({
-      success: response.ok,
-      status: response.status,
-      apiKey: mask(apiKey),
-      model: modelName,
-      response: data
-    });
-  } catch (e) {
-    res.status(500).json({
-      success: false,
-      error: e.message,
-      apiKey: mask(apiKey),
-      model: modelName
-    });
+    } catch (e) {
+      results.push({
+        model,
+        success: false,
+        error: e.message
+      });
+    }
   }
+
+  res.status(500).json({
+    success: false,
+    apiKey: mask(apiKey),
+    error: 'All models failed',
+    results: results
+  });
 });
 
 app.post('/api/trigger-weight-prompt', async (req, res) => {
