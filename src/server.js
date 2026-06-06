@@ -72,29 +72,45 @@ async function calcStreak() {
   return streak;
 }
 
-// ── PROXY Gemini AI ──────────────────────────────────────────
+// ── PROXY OpenRouter AI ──────────────────────────────────────────
 app.post('/api/ai', async (req, res) => {
   try {
     const { system, messages, max_tokens = 1000 } = req.body;
-    const contents = messages.map(m => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }]
-    }));
+    
+    // Convert to OpenAI format expected by OpenRouter
+    const formattedMessages = [];
+    if (system) {
+      formattedMessages.push({ role: 'system', content: system });
+    }
+    messages.forEach(m => {
+      formattedMessages.push({ role: m.role, content: m.content });
+    });
+
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      'https://openrouter.ai/api/v1/chat/completions',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'HTTP-Referer': 'https://fitai-1pnw.onrender.com',
+          'X-Title': 'FitAI'
+        },
         body: JSON.stringify({
-          system_instruction: { parts: [{ text: system || '' }] },
-          contents,
-          generationConfig: { maxOutputTokens: max_tokens, temperature: 0.7 }
-        }),
+          model: process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free',
+          messages: formattedMessages,
+          max_tokens: max_tokens,
+          temperature: 0.7
+        })
       }
     );
+    
     const data = await response.json();
-    if (!response.ok) return res.status(response.status).json({ error: data.error?.message });
-    res.json({ text: data.candidates?.[0]?.content?.parts?.[0]?.text || '' });
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data.error?.message || 'Erro na API do OpenRouter' });
+    }
+    
+    res.json({ text: data.choices?.[0]?.message?.content || '' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -268,48 +284,12 @@ app.get('/api/test-twilio', async (req, res) => {
   }
 });
 
-app.get('/api/test-gemini', async (req, res) => {
-  const apiKey = process.env.GEMINI_API_KEY;
+app.get('/api/test-openrouter', async (req, res) => {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const modelName = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free';
   if (!apiKey) {
-    return res.status(400).json({ success: false, error: 'GEMINI_API_KEY env var is not set on the server' });
+    return res.status(400).json({ success: false, error: 'OPENROUTER_API_KEY env var is not set on the server' });
   }
-
-  const testModel = async (apiVersion, modelName) => {
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: 'Respond with "OK"' }] }]
-          })
-        }
-      );
-      const data = await response.json();
-      return {
-        apiVersion,
-        model: modelName,
-        status: response.status,
-        ok: response.ok,
-        response: data
-      };
-    } catch (e) {
-      return {
-        apiVersion,
-        model: modelName,
-        error: e.message
-      };
-    }
-  };
-
-  const results = await Promise.all([
-    testModel('v1beta', 'gemini-2.0-flash'),
-    testModel('v1beta', 'gemini-1.5-flash'),
-    testModel('v1', 'gemini-1.5-flash'),
-    testModel('v1beta', 'gemini-1.5-flash-latest'),
-    testModel('v1', 'gemini-1.5-flash-latest')
-  ]);
 
   const mask = (str) => {
     if (!str) return 'not set';
@@ -317,11 +297,42 @@ app.get('/api/test-gemini', async (req, res) => {
     return `${str.slice(0, 10)}...${str.slice(-4)}`;
   };
 
-  res.json({
-    success: results.some(r => r.ok),
-    gemini_key: mask(apiKey),
-    results
-  });
+  try {
+    console.log(`Testing OpenRouter with model ${modelName}...`);
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://fitai-1pnw.onrender.com',
+          'X-Title': 'FitAI'
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages: [{ role: 'user', content: 'Respond with "OK"' }],
+          max_tokens: 10
+        })
+      }
+    );
+    
+    const data = await response.json();
+    res.json({
+      success: response.ok,
+      status: response.status,
+      apiKey: mask(apiKey),
+      model: modelName,
+      response: data
+    });
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: e.message,
+      apiKey: mask(apiKey),
+      model: modelName
+    });
+  }
 });
 
 app.post('/api/trigger-weight-prompt', async (req, res) => {
