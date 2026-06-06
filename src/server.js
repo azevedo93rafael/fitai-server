@@ -97,7 +97,7 @@ app.post('/api/ai', async (req, res) => {
           'X-Title': 'FitAI'
         },
         body: JSON.stringify({
-          model: process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free',
+          model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
           messages: formattedMessages,
           max_tokens: max_tokens,
           temperature: 0.7
@@ -286,7 +286,7 @@ app.get('/api/test-twilio', async (req, res) => {
 
 app.get('/api/test-openrouter', async (req, res) => {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const modelName = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free';
+  const modelName = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
   if (!apiKey) {
     return res.status(400).json({ success: false, error: 'OPENROUTER_API_KEY env var is not set on the server' });
   }
