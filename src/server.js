@@ -440,6 +440,37 @@ app.get('/api/cargas', async (req, res) => {
   res.json({ cargas: map });
 });
 
+app.post('/api/reset-all-data', async (req, res) => {
+  try {
+    const { key } = req.body;
+    if (key !== 'fitaireset123') {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    console.log('🧹 Resetando todas as tabelas no Supabase...');
+    
+    // Deleta os registros. Usando filtros para abranger todos os dados
+    const deleteCheckins = await supabase.from('checkins').delete().neq('date', '1970-01-01');
+    const deleteWeightLog = await supabase.from('weight_log').delete().neq('date', '1970-01-01');
+    const deleteCargas = await supabase.from('cargas').delete().neq('date', '1970-01-01');
+    const deleteProgram = await supabase.from('program').delete().neq('id', 0);
+    
+    console.log('✅ Supabase resetado com sucesso.');
+    res.json({
+      success: true,
+      message: 'Todos os dados foram resetados com sucesso no Supabase.',
+      details: {
+        checkins: deleteCheckins.statusText,
+        weightLog: deleteWeightLog.statusText,
+        cargas: deleteCargas.statusText,
+        program: deleteProgram.statusText
+      }
+    });
+  } catch (e) {
+    console.error('Erro ao resetar dados:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Start ────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 FitAI Server na porta ${PORT}`);
