@@ -268,6 +268,50 @@ app.get('/api/test-twilio', async (req, res) => {
   }
 });
 
+app.get('/api/test-gemini', async (req, res) => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ success: false, error: 'GEMINI_API_KEY env var is not set on the server' });
+  }
+
+  const testModel = async (modelName) => {
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: 'Respond with "OK"' }] }]
+          })
+        }
+      );
+      const data = await response.json();
+      return {
+        model: modelName,
+        status: response.status,
+        ok: response.ok,
+        response: data
+      };
+    } catch (e) {
+      return {
+        model: modelName,
+        error: e.message
+      };
+    }
+  };
+
+  const results = await Promise.all([
+    testModel('gemini-2.0-flash'),
+    testModel('gemini-1.5-flash')
+  ]);
+
+  res.json({
+    success: results.some(r => r.ok),
+    results
+  });
+});
+
 app.post('/api/trigger-weight-prompt', async (req, res) => {
   pendingInput = 'weight';
   await sendWA(MY_NUMBER,
