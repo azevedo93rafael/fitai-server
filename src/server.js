@@ -274,10 +274,10 @@ app.get('/api/test-gemini', async (req, res) => {
     return res.status(400).json({ success: false, error: 'GEMINI_API_KEY env var is not set on the server' });
   }
 
-  const testModel = async (modelName) => {
+  const testModel = async (apiVersion, modelName) => {
     try {
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent?key=${apiKey}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -288,6 +288,7 @@ app.get('/api/test-gemini', async (req, res) => {
       );
       const data = await response.json();
       return {
+        apiVersion,
         model: modelName,
         status: response.status,
         ok: response.ok,
@@ -295,6 +296,7 @@ app.get('/api/test-gemini', async (req, res) => {
       };
     } catch (e) {
       return {
+        apiVersion,
         model: modelName,
         error: e.message
       };
@@ -302,8 +304,11 @@ app.get('/api/test-gemini', async (req, res) => {
   };
 
   const results = await Promise.all([
-    testModel('gemini-2.0-flash'),
-    testModel('gemini-1.5-flash')
+    testModel('v1beta', 'gemini-2.0-flash'),
+    testModel('v1beta', 'gemini-1.5-flash'),
+    testModel('v1', 'gemini-1.5-flash'),
+    testModel('v1beta', 'gemini-1.5-flash-latest'),
+    testModel('v1', 'gemini-1.5-flash-latest')
   ]);
 
   const mask = (str) => {
