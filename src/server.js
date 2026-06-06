@@ -306,8 +306,15 @@ app.get('/api/test-gemini', async (req, res) => {
     testModel('gemini-1.5-flash')
   ]);
 
+  const mask = (str) => {
+    if (!str) return 'not set';
+    if (str.length <= 8) return 'set (too short)';
+    return `${str.slice(0, 10)}...${str.slice(-4)}`;
+  };
+
   res.json({
     success: results.some(r => r.ok),
+    gemini_key: mask(apiKey),
     results
   });
 });
