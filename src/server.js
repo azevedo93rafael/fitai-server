@@ -222,17 +222,17 @@ app.get('/api/status', async (req, res) => {
 });
 
 app.get('/api/test-twilio', async (req, res) => {
+  const mask = (str) => {
+    if (!str) return 'not set';
+    if (str.length <= 8) return 'set (too short)';
+    return `${str.slice(0, 10)}...${str.slice(-4)}`;
+  };
+
   try {
     const from = process.env.TWILIO_FROM_NUMBER;
     const to = process.env.MY_WHATSAPP_NUMBER;
     const sid = process.env.TWILIO_ACCOUNT_SID;
     const token = process.env.TWILIO_AUTH_TOKEN;
-
-    const mask = (str) => {
-      if (!str) return 'not set';
-      if (str.length <= 8) return 'set (too short)';
-      return `${str.slice(0, 10)}...${str.slice(-4)}`;
-    };
 
     console.log(`Sending test message from ${from} to ${to}...`);
     const result = await twilioClient.messages.create({
